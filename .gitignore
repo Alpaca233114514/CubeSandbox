@@ -21,6 +21,7 @@ Thumbs.db
 libs/protocols/src/*.rs
 runtime/libs/protocols/src/*.rs
 runtime/agent/src/version.rs
+CubeShim/protoc/src/*.rs
 
 # Python cache and compiled binaries in examples
 API/examples/__pycache__/

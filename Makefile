@@ -21,6 +21,21 @@ COW_STATICLIB ?= $(CUBELET_COW_THIRD_PARTY_DIR)/lib/libcubecow.a
 COW_HEADER ?= $(CUBELET_COW_THIRD_PARTY_DIR)/include/cubecow.h
 TARGET_ARCH ?= $(shell uname -m | sed 's/^arm64$$/aarch64/')
 
+# ---- Windows / Git Bash compatibility ----
+# Git Bash (MSYS2) translates POSIX paths into Windows paths before invoking
+# native Windows programs such as Docker. That breaks Docker volume mounts and
+# the container workdir (e.g. /workspace becomes C:/Program Files/Git/workspace).
+# MSYS_NO_PATHCONV disables the translation for the whole make invocation.
+#
+# The host make executable path may contain spaces/parentheses (e.g.
+# "C:/Program Files (x86)/GnuWin32/bin/make"). When that path is passed into the
+# Linux builder container via BUILDER_CMD, the shell inside the container cannot
+# parse it. Force recursive make references to use the bare command name.
+ifeq ($(OS),Windows_NT)
+  export MSYS_NO_PATHCONV := 1
+  export MAKE := make
+endif
+
 # ---- Guest kernel image build ----
 # `make kernel KERNEL_SRC=/path/to/linux` builds a vmlinux from the in-tree
 # kernel config (configs/kernel-oc9.<arch>.config) inside the unified builder
@@ -160,6 +175,7 @@ builder-run: prepare-builder-home prepare-tmp-git-credentials
 		-e CARGO_HOME=$(BUILDER_CONTAINER_HOME)/.cargo \
 		-e RUSTUP_HOME=/usr/local/rustup \
 		-e GOPATH=$(BUILDER_CONTAINER_HOME)/go \
+		-e GOFLAGS=-buildvcs=false \
 		-e BUILDER_CMD="$(BUILDER_CMD)" \
 		-e CUBE_VERSION \
 		-e CUBE_COMMIT \

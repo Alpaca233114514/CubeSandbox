@@ -41,6 +41,28 @@ ls -l /dev/kvm
 cat /sys/module/kvm_intel/parameters/nested   # or kvm_amd, expect Y / 1
 ```
 
+## Windows hosts
+
+The QEMU VM workflow above is designed for Linux hosts. On Windows you can
+still build the project using the Docker-based builder from Git Bash:
+
+1. Enable WSL2 and install Docker Desktop with the WSL2 backend.
+2. Install `make` for Git Bash:
+   ```bash
+   winget install --id GnuWin32.Make --exact
+   ```
+3. Source the Windows environment helper before running `make`:
+   ```bash
+   source dev-env/windows-env.sh
+   make all
+   ```
+
+The helper adds GnuWin32 make to `PATH`, disables MSYS2 path conversion for
+Docker, and uses the bare `make` command inside the builder container.
+
+To run sandboxes locally you still need nested virtualization inside WSL2;
+without it the build environment works but sandbox creation will fail.
+
 ## Quickstart
 
 Five steps. Run them in order.
