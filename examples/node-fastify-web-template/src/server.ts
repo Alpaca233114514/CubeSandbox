@@ -1,4 +1,5 @@
 import { mkdir, readFile, appendFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { arch, argv, platform } from "node:process";
 import { pathToFileURL } from "node:url";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
@@ -40,8 +41,8 @@ async function readCounter(counterPath: string): Promise<number> {
 
 export function buildServer(options: ServerOptions = {}): FastifyInstance {
   const stateDir = options.stateDir ?? defaultStateDir;
-  const counterPath = `${stateDir}/counter.json`;
-  const notesPath = `${stateDir}/notes.jsonl`;
+  const counterPath = join(stateDir, "counter.json");
+  const notesPath = join(stateDir, "notes.jsonl");
   const fastify = Fastify({
     ajv: {
       customOptions: {
