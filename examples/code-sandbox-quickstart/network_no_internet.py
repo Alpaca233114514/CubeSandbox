@@ -15,6 +15,7 @@ How it works:
 """
 
 import os
+from e2b.sandbox.commands.command_handle import CommandExitException
 from e2b_code_interpreter import Sandbox
 from env_utils import load_local_dotenv
 
@@ -26,11 +27,19 @@ with Sandbox.create(
     template=template_id,
     allow_internet_access=False,
 ) as sandbox:
-    # Verify: public internet is unreachable (curl should time out or be blocked)
-    result = sandbox.commands.run(
-        "curl -s --max-time 3 https://example.com -o /dev/null -w '%{http_code}' || echo 'blocked'"
-    )
-    print("internet access blocked:", result.stdout.strip() == "blocked" or result.exit_code != 0)
+    # Verify: public internet is unreachable (curl should time out or be blocked).
+    # Do not combine -w %{http_code} with '|| echo': on failure curl still prints
+    # '000' before the shell fallback runs, producing '000blocked' and a false
+    # negative. Check whether the command raised a non-zero exit exception instead.
+    blocked = False
+    try:
+        sandbox.commands.run(
+            "curl -s --max-time 3 https://example.com -o /dev/null",
+            timeout=10,
+        )
+    except CommandExitException:
+        blocked = True
+    print("internet access blocked:", blocked)
 
     # Internal sandbox logic still works normally
     result = sandbox.commands.run("echo 'isolated execution ok'")

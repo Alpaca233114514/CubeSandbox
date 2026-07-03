@@ -77,8 +77,19 @@ func main() {
 
 	os.Setenv("CONTAINERD_SUPPRESS_DEPRECATION_WARNINGS", "true")
 	mntPath := os.Getenv("NEED_SET_MNT")
+	wsl2 := isWSL2()
 
 	if mntPath == "" {
+		if wsl2 {
+			// WSL2 cannot bind-mount /proc/<pid>/ns/mnt to a regular file.
+			// Use unshare(1) to create a fresh mount namespace and re-exec ourselves.
+			if err := newCubeMntWSL2(); err != nil {
+				_, _ = fmt.Fprintf(os.Stderr, "newCubeMntWSL2 fail,%v\n", err)
+				time.Sleep(time.Second)
+				os.Exit(1)
+			}
+			return
+		}
 		runtime.LockOSThread()
 		if needNewMnt(CubeMntNsFilePath) {
 			err := newCubeMnt()
@@ -99,6 +110,13 @@ func main() {
 	} else {
 
 		parentExit()
+		if wsl2 && mntPath == "wsl2" {
+			if err := ensureWSL2Mounts(); err != nil {
+				_, _ = fmt.Fprintf(os.Stderr, "ensureWSL2Mounts fail,%v\n", err)
+				time.Sleep(time.Second)
+				os.Exit(1)
+			}
+		}
 		app := App()
 		if err := app.Run(os.Args); err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "Cubelet: %s\n", err)
@@ -616,6 +634,55 @@ func setLogLevel(context *cli.Context, config *srvconfig.Config) error {
 			return err
 		}
 		logrus.SetLevel(lvl)
+	}
+	return nil
+}
+
+// isWSL2 returns true when running inside a WSL2 kernel.
+// WSL2 does not allow bind-mounting /proc/<pid>/ns/mnt to a regular file,
+// which cubelet's normal mount-namespace bootstrap requires.
+func isWSL2() bool {
+	b, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(b), "microsoft-standard-WSL2")
+}
+
+// newCubeMntWSL2 creates a fresh mount namespace for cubelet on WSL2 by
+// re-executing cubelet through `unshare -m`. The child cubelet sees
+// NEED_SET_MNT=wsl2 and skips the bind-mounted ns file path entirely.
+func newCubeMntWSL2() error {
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	args := append([]string{"-m", self}, os.Args[1:]...)
+	cmd := exec.Command("/usr/bin/unshare", args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), "NEED_SET_MNT=wsl2")
+	return cmd.Run()
+}
+
+// ensureWSL2Mounts applies the same mount propagation setup that newCubeMnt
+// performs inside its private namespace, but without relying on a bind-mounted
+// /proc/<pid>/ns/mnt file. This runs after unshare -m has created the namespace.
+func ensureWSL2Mounts() error {
+	cmds := [][]string{
+		{"mkdir", "-p", CubeShimTopdir},
+		{"mkdir", "-p", CubeShimSandboxes},
+		{"mount", "--make-rslave", "/"},
+		{"mount", "--bind", "--make-shared", CubeShimTopdir, CubeShimTopdir},
+		{"mkdir", "-p", CubeMntNsDirPath},
+		{"touch", CubeMntNsFilePath},
+		{"mount", "--bind", "--make-private", CubeMntNsDirPath, CubeMntNsDirPath},
+	}
+	for _, cmd := range cmds {
+		if _, stderr, err := utils.ExecV(cmd, utils.DefaultTimeout); err != nil {
+			return fmt.Errorf("wsl2 mount setup err:%v,%v:%v", cmd, stderr, err)
+		}
 	}
 	return nil
 }

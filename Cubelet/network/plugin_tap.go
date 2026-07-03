@@ -59,21 +59,39 @@ const (
 )
 
 func getGatewayMacAddr(itName string) (string, error) {
-	link, err := netlink.LinkByName(itName)
-	if err != nil {
-		return "", err
-	}
-	neighs, err := netlink.NeighList(link.Attrs().Index, 0)
-	if err != nil {
-		return "", err
-	}
-	if len(neighs) < 1 {
-		return "", fmt.Errorf("physics net card arp not unique. detail: %s", utils.InterfaceToString(neighs))
-	}
-	for _, neigh := range neighs {
-		if neigh.Family == 2 && neigh.State == unix.NUD_REACHABLE {
-			return neigh.HardwareAddr.String(), nil
+	// Prefer a REACHABLE entry, but also accept STALE/PERMANENT/NOARP.
+	// WSL2's virtual switch can return an empty or STALE neighbour table for
+	// eth0 right after network-agent starts; retry briefly instead of failing
+	// the whole network plugin initialization.
+	validStates := unix.NUD_REACHABLE | unix.NUD_STALE | unix.NUD_PERMANENT | unix.NUD_NOARP
+	for attempt := 0; attempt < retryNum; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Second)
 		}
+		link, err := netlink.LinkByName(itName)
+		if err != nil {
+			return "", err
+		}
+		neighs, err := netlink.NeighList(link.Attrs().Index, 0)
+		if err != nil {
+			return "", err
+		}
+		if len(neighs) < 1 {
+			log.G(context.TODO()).Infof("getGatewayMacAddr: no neighbours on %s yet (attempt %d)", itName, attempt)
+			continue
+		}
+		for _, neigh := range neighs {
+			if neigh.Family == 2 && neigh.State == unix.NUD_REACHABLE {
+				return neigh.HardwareAddr.String(), nil
+			}
+		}
+		for _, neigh := range neighs {
+			if neigh.Family == 2 && neigh.State&validStates != 0 && neigh.HardwareAddr != nil {
+				log.G(context.TODO()).Infof("getGatewayMacAddr: using gateway %s in state 0x%x on %s", neigh.IP, neigh.State, itName)
+				return neigh.HardwareAddr.String(), nil
+			}
+		}
+		log.G(context.TODO()).Infof("getGatewayMacAddr: no usable gateway neighbour on %s (attempt %d)", itName, attempt)
 	}
 
 	return "", errors.New("NotFound")
