@@ -247,3 +247,174 @@ Also fixed demo detection/selection issues discovered during WSL2 validation:
 - `examples/code-sandbox-quickstart/network_allowlist.py`
 
 None of the above change the normal Linux execution path except under WSL2 detection or via explicit helper scripts.
+
+
+
+## CubeSandbox Project Overview
+
+CubeSandbox is a MicroVM-based code sandbox platform. It registers container images as **templates**, then launches isolated MicroVM sandboxes from those templates. Each sandbox gets its own TAP network interface, eBPF/XDP-based egress policy, and SDK access via Python/Go clients.
+
+### Core components
+
+| Component | Role | Typical host |
+|-----------|------|--------------|
+| `CubeMaster` | Control plane: template management, sandbox scheduling, node registry | Master node / K8s |
+| `Cubelet` | Node agent: creates/destroys MicroVMs, attaches network, reports health | Every worker node |
+| `network-agent` | Manages TAP devices, SNAT, eBPF maps (`allow_out_v2`, `deny_out`, `dns_allow`) | Every worker node |
+| `CubeNet` | eBPF/XDP data plane (`cubevs`) | Loaded by network-agent |
+| `CubeProxy` | Reverse proxy for `*.cube.app` sandbox domains | Edge / LB |
+| `hypervisor` | MicroVM VMM (Firecracker/Cloud Hypervisor fork) | Worker node |
+| `agent` / `CubeShim` | In-guest agent and containerd shim | Inside MicroVM |
+| `CubeAPI` | Public API gateway | Master node |
+
+### Key source locations
+
+- Cubelet: `Cubelet/`
+- Network agent: `network-agent/`
+- eBPF data plane: `CubeNet/cubevs/` and `CubeNet/src/*.bpf.c`
+- SDK demos: `examples/code-sandbox-quickstart/`
+- One-click deploy: `deploy/one-click/`
+
+
+
+## Production Deployment
+
+For production, use `deploy/one-click/` or a custom orchestration on physical machines/VMs. WSL2 is **not** a supported production environment.
+
+### one-click path
+
+```bash
+cd deploy/one-click
+# Read README.md / README_zh.md, fill in env, then:
+./install.sh
+```
+
+This typically installs and wires together:
+
+- CubeMaster + MySQL/Redis
+- Cubelet + network-agent
+- CubeProxy + CubeAPI
+- Hypervisor binary and guest image
+
+### Production configuration checklist
+
+| Area | What to configure |
+|------|-------------------|
+| Network | TAP bridge, SNAT IP pool, node DNS, `*.cube.app` certificates |
+| Images | Push sandbox images to an accessible registry |
+| Templates | `cubemastercli tpl create-from-image ...` for each image |
+| Certificates | Real CA or internal trust chain for `*.cube.app` |
+| Storage | Snapshot store, writable-layer backend |
+| Monitoring | network-agent healthz, Cubelet metrics, Master API logs |
+
+### Register a production template
+
+```bash
+cubemastercli -a <master-ip> -p 8089 tpl create-from-image \
+  --image your-registry.example.com/your-sandbox:latest \
+  --writable-layer-size 10G \
+  --expose-port 49999 \
+  --expose-port 49983 \
+  --probe 49983 \
+  --probe-path /health
+```
+
+### Use the production SDK
+
+```bash
+export E2B_API_URL=https://your-cube-api.example.com
+export CUBE_TEMPLATE_ID=<tpl-xxx>
+export SSL_CERT_FILE=/path/to/trusted-ca.pem
+
+python your_script.py
+```
+
+
+
+## Daily Operation Commands
+
+### Check services
+
+```bash
+systemctl is-active cube-sandbox-network-agent cube-sandbox-cubelet
+curl -sS http://127.0.0.1:19090/healthz
+```
+
+### Master CLI
+
+```bash
+# Nodes
+cubemastercli -a 127.0.0.1 -p 8089 node list
+
+# Templates
+cubemastercli -a 127.0.0.1 -p 8089 tpl list
+cubemastercli -a 127.0.0.1 -p 8089 tpl delete --template-id <id>
+
+# Sandboxes
+cubemastercli -a 127.0.0.1 -p 8089 sandbox list
+```
+
+### Logs
+
+```bash
+journalctl -u cube-sandbox-cubelet -f
+journalctl -u cube-sandbox-network-agent -f
+```
+
+### Inspect network state
+
+```bash
+# TAP devices created by Cubelet/network-agent
+ip link show | grep '^[0-9]*: z'
+
+# Pinned eBPF maps
+ls /sys/fs/bpf/
+
+# Active eBPF programs
+bpftool prog show
+bpftool map show
+```
+
+
+
+## Development & Debug Workflow
+
+### Modifying Cubelet
+
+```bash
+cd Cubelet
+make build
+install -m 0755 build/cubelet /usr/local/services/cubetoolbox/Cubelet/bin/cubelet
+systemctl restart cube-sandbox-cubelet.service
+```
+
+Relevant test packages:
+
+```bash
+cd Cubelet
+go test ./network/... ./cmd/cubelet/...
+```
+
+### Modifying network policy
+
+Source files:
+
+- `CubeNet/cubevs/netpolicy.go` — Go side: map management, allow/deny/DNS logic
+- `CubeNet/src/mvmtap.bpf.c` — BPF side: egress policy enforcement (`check_net_policy`)
+- `Cubelet/network/plugin_tap.go` — Cubelet → network-agent request translation
+
+After changing BPF C code, rebuild and restart `network-agent`. After changing Go code in `CubeNet/`, rebuild `network-agent` (and Cubelet if the API changed).
+
+### Modifying SDK demos
+
+Files under `examples/code-sandbox-quickstart/` can be edited directly. No service restart is required; just re-run the demo script.
+
+### Common failure patterns
+
+| Symptom | Likely cause | Check |
+|---------|--------------|-------|
+| `network-agent` healthz fails | `/sys/fs/bpf` not mounted | `stat -fc %T /sys/fs/bpf` |
+| Cubelet fails to start | mount namespace / gateway MAC issue | `journalctl -u cube-sandbox-cubelet` |
+| Sandbox `run_code()` 502 | kernel gateway not ready yet | poll `49999-<sid>.cube.app/health` |
+| DNS timeout in sandbox | `allow_internet_access=false` blocks DNS | use domain `allow_out` or allow DNS server CIDR |
+| Private IP unreachable | CubeVS always denies RFC1918 ranges | use public IPs/domains in allowlists |
